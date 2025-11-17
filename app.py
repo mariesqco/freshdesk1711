@@ -8,6 +8,11 @@ with open("config.py", "w") as f:
 import config
 
 app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Webhook Intercom/Freshdesk is running 🚀"
+    
 def verify_signature(raw_body, signature_header):
     if not signature_header or not signature_header.startswith("sha1="):
         return False
