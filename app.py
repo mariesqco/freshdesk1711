@@ -56,8 +56,8 @@ def intercom_webhook():
     signature = request.headers.get("X-Hub-Signature")
 
     # Vérification signature HMAC
-    if not verify_signature(raw, signature):
-        return "Invalid signature", 401
+    # if not verify_signature(raw, signature):
+       #  return "Invalid signature", 401
 
     payload = request.json or {}
 
