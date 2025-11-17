@@ -9,7 +9,7 @@ with open("config.py", "w") as f:
 import config
 
 # Tag VIP unifié
-VIP_TAG = config.VIP_TAG  # Doit être "⭐⭐VIP ⭐⭐" dans config.py
+VIP_TAG = "⭐⭐VIP ⭐⭐"
 
 app = Flask(__name__)
 
