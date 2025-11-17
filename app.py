@@ -1,9 +1,13 @@
 from flask import Flask, request, jsonify
 import hmac, hashlib, json, requests
-import config   # <--- On charge ton fichier config.py
+import os
+
+# On recrée le config.py à partir des variables Heroku
+with open("config.py", "w") as f:
+    f.write(os.getenv("CONFIG_CONTENT", ""))
+import config
 
 app = Flask(__name__)
-"test"
 def verify_signature(raw_body, signature_header):
     if not signature_header or not signature_header.startswith("sha1="):
         return False
