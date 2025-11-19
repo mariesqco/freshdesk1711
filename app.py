@@ -1,6 +1,5 @@
-rom flask import Flask, request, jsonify
+from flask import Flask, request, jsonify
 import hmac, hashlib, requests, os, json
-import re
 
 # ------------------------------
 # Chargement variables Heroku
@@ -12,27 +11,24 @@ DEFAULT_PRIORITY = int(os.getenv("DEFAULT_PRIORITY", 2))
 ASSIGN_GROUP_ID = os.getenv("ASSIGN_GROUP_ID")
 VIP_KEYWORDS = os.getenv("VIP_KEYWORDS", "VIP,⭐⭐VIP ⭐⭐").split(",")
 
-# Tag VIP unifié
 VIP_TAG = "⭐⭐VIP ⭐⭐"
-FRESHDESK_VIP_FIELD = "vip"  # Nom API du champ personnalisé
 
 app = Flask(__name__)
 
 # ------------------------------
-# Route racine pour test serveur
+# Route racine
 # ------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "✅ Webhook Intercom/Freshdesk is running 🚀", 200
 
 # ------------------------------
-# Vérification HMAC Intercom
+# Vérification signature Intercom
 # ------------------------------
 def verify_signature(raw_body, signature_header):
     if not signature_header:
         return False
 
-    # Support du préfixe sha1=
     if signature_header.startswith("sha1="):
         received_sig = signature_header.split("sha1=")[1]
     else:
@@ -55,9 +51,10 @@ def freshdesk_request(path, method="GET", data=None):
     auth = (FRESHDESK_API_KEY, "X")
 
     response = requests.request(method, url, headers=headers, json=data, auth=auth)
+
     try:
         return response.status_code, response.json()
-    except Exception:
+    except:
         return response.status_code, response.text
 
 # ------------------------------
@@ -86,6 +83,8 @@ def intercom_webhook():
 
     item = payload.get("data", {}).get("item", {})
     tag_name = item.get("tag", {}).get("name", "")
+
+    import re
     tag_clean = re.sub(r"[^a-zA-Z0-9]", "", tag_name).lower()
     if "vip" not in tag_clean:
         print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
@@ -101,7 +100,7 @@ def intercom_webhook():
     print(f"🔥 Tag VIP détecté pour : {email}")
 
     # ------------------------------
-    # Récupère ou crée contact Freshdesk
+    # Récupération / création du contact Freshdesk
     # ------------------------------
     status, data = freshdesk_request(f"/contacts?email={email}")
 
@@ -119,29 +118,36 @@ def intercom_webhook():
     contact_id = contact_fd.get("id")
 
     # ------------------------------
-    # Ajout tag VIP sur contact + champ personnalisé "vip"
+    # Ajout tag + champ personnalisé VIP
     # ------------------------------
     existing_tags = contact_fd.get("tags", [])
-    custom_fields = contact_fd.get("custom_fields", {})
 
-    update_contact_data = {}
-
-    # Ajout du tag si absent
+    # Ajout du tag VIP si absent
     if VIP_TAG not in existing_tags:
-        update_contact_data["tags"] = existing_tags + [VIP_TAG]
+        freshdesk_request(
+            f"/contacts/{contact_id}",
+            "PUT",
+            {"tags": existing_tags + [VIP_TAG]}
+        )
+        print("🏷 Tag VIP ajouté au contact")
 
-    # Met à jour le champ personnalisé "vip" avec la valeur du tag
-    custom_fields[FRESHDESK_VIP_FIELD] = VIP_TAG
-    update_contact_data["custom_fields"] = custom_fields
-
-    if update_contact_data:
-        freshdesk_request(f"/contacts/{contact_id}", "PUT", update_contact_data)
-        print("🏷 Tag VIP + champ personnalisé mis à jour pour le contact")
+    # Mise à jour du champ personnalisé vip => "⭐⭐VIP ⭐⭐"
+    freshdesk_request(
+        f"/contacts/{contact_id}",
+        "PUT",
+        {
+            "custom_fields": {
+                "vip": VIP_TAG
+            }
+        }
+    )
+    print("✨ Champ personnalisé VIP mis à jour")
 
     # ------------------------------
     # Mise à jour des tickets Freshdesk
     # ------------------------------
     status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
+
     if status == 200 and isinstance(tickets, list):
         print(f"🎫 {len(tickets)} tickets à mettre à jour")
         for ticket in tickets:
@@ -154,9 +160,10 @@ def intercom_webhook():
                 update_data["group_id"] = ASSIGN_GROUP_ID
 
             freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_data)
-            print(f"✅ Ticket #{ticket['id']} mis à jour avec priorité VIP")
+            print(f"✅ Ticket #{ticket['id']} mis à jour")
 
     return jsonify({"success": True, "email": email})
+
 
 # ------------------------------
 # Serveur local / Heroku
