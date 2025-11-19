@@ -89,10 +89,12 @@ def intercom_webhook():
 
     item = payload.get("data", {}).get("item", {})
     tag_name = item.get("tag", {}).get("name", "")
-    if not any(keyword.lower() in tag_name.lower() for keyword in VIP_KEYWORDS):
+    import re
+    tag_clean = re.sub(r"[^a-zA-Z0-9]", "", tag_name).lower()
+    if "vip" not in tag_clean:
         print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
         return jsonify({"ignored": "not VIP"})
-
+    
     contact = item.get("contact", {})
     email = contact.get("email")
     name = contact.get("name", email)
