@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import hmac, hashlib, requests, os, json
+import re
 
 # ------------------------------
 # Chargement variables Heroku
@@ -14,6 +15,9 @@ VIP_KEYWORDS = os.getenv("VIP_KEYWORDS", "VIP,⭐⭐VIP ⭐⭐").split(",")
 # Tag VIP unifié
 VIP_TAG = "⭐⭐VIP ⭐⭐"
 
+# Nom interne du champ personnalisé Freshdesk
+CUSTOM_FIELD_VIP = "⭐⭐VIP ⭐⭐"   # <-- MET ICI TON NOM INTERNE !!
+
 app = Flask(__name__)
 
 # ------------------------------
@@ -27,11 +31,9 @@ def home():
 # Vérification HMAC Intercom
 # ------------------------------
 def verify_signature(raw_body, signature_header):
-    # Cas où Intercom n’envoie PAS de signature (ex : Test Webhook)
     if not signature_header:
         return False
 
-    # Support du préfixe sha1=
     if signature_header.startswith("sha1="):
         received_sig = signature_header.split("sha1=")[1]
     else:
@@ -79,9 +81,7 @@ def intercom_webhook():
     payload = request.json or {}
     print("📦 Payload reçu :", json.dumps(payload, indent=2, ensure_ascii=False))
 
-    # ------------------------------
-    # Nouveau format Intercom VIP tag
-    # ------------------------------
+    # Vérifie qu’il s’agit du tag créé sur un contact
     topic = payload.get("topic")
     if topic != "contact.user.tag.created":
         print(f"ℹ️ Événement ignoré : {topic}")
@@ -89,12 +89,14 @@ def intercom_webhook():
 
     item = payload.get("data", {}).get("item", {})
     tag_name = item.get("tag", {}).get("name", "")
-    import re
+
+    # Normalisation du tag pour détecter VIP
     tag_clean = re.sub(r"[^a-zA-Z0-9]", "", tag_name).lower()
     if "vip" not in tag_clean:
         print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
         return jsonify({"ignored": "not VIP"})
 
+    # Récupération du contact Intercom
     contact = item.get("contact", {})
     email = contact.get("email")
     name = contact.get("name", email)
@@ -123,12 +125,32 @@ def intercom_webhook():
     contact_id = contact_fd.get("id")
 
     # ------------------------------
-    # Ajout tag VIP sur contact
+    # Ajout tag VIP au contact Freshdesk
     # ------------------------------
     existing_tags = contact_fd.get("tags", [])
     if VIP_TAG not in existing_tags:
-        freshdesk_request(f"/contacts/{contact_id}", "PUT", {"tags": existing_tags + [VIP_TAG]})
+        freshdesk_request(
+            f"/contacts/{contact_id}",
+            "PUT",
+            {"tags": existing_tags + [VIP_TAG]}
+        )
         print("🏷 Tag VIP ajouté au contact")
+
+    # ------------------------------
+    # Mise à jour du champ personnalisé VIP
+    # ------------------------------
+    update_custom_field = {
+        "custom_fields": {
+            CUSTOM_FIELD_VIP: VIP_TAG
+        }
+    }
+
+    freshdesk_request(
+        f"/contacts/{contact_id}",
+        "PUT",
+        update_custom_field
+    )
+    print(f"📝 Champ personnalisé '{CUSTOM_FIELD_VIP}' mis à jour avec : {VIP_TAG}")
 
     # ------------------------------
     # Mise à jour des tickets Freshdesk
