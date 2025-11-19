@@ -68,9 +68,7 @@ def intercom_webhook():
     raw = request.get_data()
     signature = request.headers.get("X-Hub-Signature")
 
-    # Vérification signature HMAC
     if not verify_signature(raw, signature):
-        # Si signature absente → Test webhook Intercom
         if signature is None:
             print("⚠️ Test Webhook Intercom reçu (pas signé)")
             return jsonify({"warning": "Unsigned Intercom test webhook"}), 200
@@ -78,31 +76,31 @@ def intercom_webhook():
         return "Invalid signature", 401
 
     print("✅ Webhook Intercom authentifié")
-
     payload = request.json or {}
     print("📦 Payload reçu :", json.dumps(payload, indent=2, ensure_ascii=False))
 
-    # On traite uniquement les événements de type "user_tag"
-    if payload.get("type") != "user_tag":
-        return jsonify({"ignored": "not user_tag"})
+    # ------------------------------
+    # Nouveau format Intercom VIP tag
+    # ------------------------------
+    topic = payload.get("topic")
+    if topic != "contact.user.tag.created":
+        print(f"ℹ️ Événement ignoré : {topic}")
+        return jsonify({"ignored": "not contact.user.tag.created"})
 
-    # Vérifie si le tag correspond à un VIP
-    tag_name = payload.get("tag", {}).get("name", "")
+    item = payload.get("data", {}).get("item", {})
+    tag_name = item.get("tag", {}).get("name", "")
     if not any(keyword.lower() in tag_name.lower() for keyword in VIP_KEYWORDS):
-        print("➡️ Tag non VIP, ignoré.")
+        print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
         return jsonify({"ignored": "not VIP"})
 
-    print(f"🔥 Tag VIP détecté : {tag_name}")
-
-    # Récupération utilisateur
-    user = payload.get("user", {})
-    email = user.get("email")
-    name = user.get("name", email)
+    contact = item.get("contact", {})
+    email = contact.get("email")
+    name = contact.get("name", email)
 
     if not email:
         return jsonify({"error": "no email"}), 400
 
-    print(f"👤 Utilisateur VIP : {email}")
+    print(f"🔥 Tag VIP détecté pour : {email}")
 
     # ------------------------------
     # Récupère ou crée contact Freshdesk
@@ -110,7 +108,7 @@ def intercom_webhook():
     status, data = freshdesk_request(f"/contacts?email={email}")
 
     if status == 200 and isinstance(data, list) and data:
-        contact = data[0]
+        contact_fd = data[0]
         print("📇 Contact Freshdesk trouvé")
     else:
         print("📇 Contact Freshdesk introuvable → création")
@@ -118,14 +116,14 @@ def intercom_webhook():
         if status not in (200, 201):
             print("❌ Impossible de créer le contact Freshdesk")
             return jsonify({"error": "cannot create contact", "details": data})
-        contact = data
+        contact_fd = data
 
-    contact_id = contact.get("id")
+    contact_id = contact_fd.get("id")
 
     # ------------------------------
     # Ajout tag VIP sur contact
     # ------------------------------
-    existing_tags = contact.get("tags", [])
+    existing_tags = contact_fd.get("tags", [])
     if VIP_TAG not in existing_tags:
         freshdesk_request(f"/contacts/{contact_id}", "PUT", {"tags": existing_tags + [VIP_TAG]})
         print("🏷 Tag VIP ajouté au contact")
@@ -134,7 +132,6 @@ def intercom_webhook():
     # Mise à jour des tickets Freshdesk
     # ------------------------------
     status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
-
     if status == 200 and isinstance(tickets, list):
         print(f"🎫 {len(tickets)} tickets à mettre à jour")
         for ticket in tickets:
@@ -150,6 +147,7 @@ def intercom_webhook():
             print(f"✅ Ticket #{ticket['id']} mis à jour avec priorité VIP")
 
     return jsonify({"success": True, "email": email})
+
 
 # ------------------------------
 # Serveur local / Heroku
