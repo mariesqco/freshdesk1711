@@ -1,143 +1,159 @@
 from flask import Flask, request, jsonify
-import hmac, hashlib, requests, os
-import json
+import hmac, hashlib, requests, os, json
 
 # ------------------------------
 # Chargement variables Heroku
 # ------------------------------
-
 INTERCOM_CLIENT_SECRET = os.getenv("INTERCOM_CLIENT_SECRET")
 FRESHDESK_DOMAIN = os.getenv("FRESHDESK_DOMAIN")
 FRESHDESK_API_KEY = os.getenv("FRESHDESK_API_KEY")
-
-# Tags VIP
+DEFAULT_PRIORITY = int(os.getenv("DEFAULT_PRIORITY", 2))
+ASSIGN_GROUP_ID = os.getenv("ASSIGN_GROUP_ID")
 VIP_KEYWORDS = os.getenv("VIP_KEYWORDS", "VIP,⭐⭐VIP ⭐⭐").split(",")
+
+# Tag VIP unifié
 VIP_TAG = "⭐⭐VIP ⭐⭐"
 
 app = Flask(__name__)
 
+# ------------------------------
+# Route racine pour test serveur
+# ------------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Webhook Intercom/Freshdesk is running 🚀", 200
 
 # ------------------------------
-# Vérification de la signature Intercom
+# Vérification HMAC Intercom
 # ------------------------------
-
-def verify_signature(req):
-    received_sig = req.headers.get("X-Hub-Signature")
-    if not received_sig:
-        print("❌ Signature Intercom manquante")
+def verify_signature(raw_body, signature_header):
+    # Cas où Intercom n’envoie PAS de signature (ex : Test Webhook)
+    if not signature_header:
         return False
 
-    body = req.get_data()
+    # Support du préfixe sha1=
+    if signature_header.startswith("sha1="):
+        received_sig = signature_header.split("sha1=")[1]
+    else:
+        received_sig = signature_header
+
     computed_sig = hmac.new(
         INTERCOM_CLIENT_SECRET.encode(),
-        body,
+        raw_body,
         hashlib.sha1
     ).hexdigest()
 
-    if not hmac.compare_digest(received_sig, computed_sig):
-        print("❌ Signature Intercom invalide")
-        return False
-
-    return True
-
+    return hmac.compare_digest(received_sig, computed_sig)
 
 # ------------------------------
-# Freshdesk – Récupérer l'ID du contact
+# Appels API Freshdesk
 # ------------------------------
+def freshdesk_request(path, method="GET", data=None):
+    url = f"https://{FRESHDESK_DOMAIN}/api/v2{path}"
+    headers = {"Content-Type": "application/json"}
+    auth = (FRESHDESK_API_KEY, "X")
 
-def get_freshdesk_contact_id(email):
-    url = f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/contacts?email={email}"
+    response = requests.request(method, url, headers=headers, json=data, auth=auth)
 
-    response = requests.get(
-        url,
-        auth=(FRESHDESK_API_KEY, "X")
-    )
-
-    if response.status_code != 200:
-        print("❌ Erreur API Freshdesk (recherche contact) :", response.status_code, response.text)
-        return None
-
-    contacts = response.json()
-    if not contacts:
-        print("❌ Aucun contact trouvé dans Freshdesk pour :", email)
-        return None
-
-    return contacts[0]["id"]
-
-
-# ------------------------------
-# Freshdesk – Ajouter le tag VIP au contact
-# ------------------------------
-
-def update_freshdesk_contact_tags(contact_id):
-    url = f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2/contacts/{contact_id}"
-
-    data = {
-        "tags": [VIP_TAG]
-    }
-
-    response = requests.put(
-        url,
-        auth=(FRESHDESK_API_KEY, "X"),
-        headers={"Content-Type": "application/json"},
-        data=json.dumps(data)
-    )
-
-    if response.status_code in (200, 201):
-        print("✅ Tag VIP ajouté dans Freshdesk !")
-    else:
-        print("❌ Erreur lors de la mise à jour du contact Freshdesk :", response.status_code, response.text)
-
+    try:
+        return response.status_code, response.json()
+    except:
+        return response.status_code, response.text
 
 # ------------------------------
 # Webhook Intercom
 # ------------------------------
-
 @app.route("/intercom-webhook", methods=["POST"])
 def intercom_webhook():
+    raw = request.get_data()
+    signature = request.headers.get("X-Hub-Signature")
 
-    if not verify_signature(request):
-        return jsonify({"error": "invalid_signature"}), 401
+    # Vérification signature HMAC
+    if not verify_signature(raw, signature):
+        # Si signature absente → Test webhook Intercom
+        if signature is None:
+            print("⚠️ Test Webhook Intercom reçu (pas signé)")
+            return jsonify({"warning": "Unsigned Intercom test webhook"}), 200
+        print("❌ Signature Intercom invalide")
+        return "Invalid signature", 401
 
     print("✅ Webhook Intercom authentifié")
 
-    payload = request.get_json()
-    print("📦 Payload :", json.dumps(payload, indent=2, ensure_ascii=False))
+    payload = request.json or {}
+    print("📦 Payload reçu :", json.dumps(payload, indent=2, ensure_ascii=False))
 
-    topic = payload.get("topic")
-    item = payload.get("data", {}).get("item", {})
+    # On traite uniquement les événements de type "user_tag"
+    if payload.get("type") != "user_tag":
+        return jsonify({"ignored": "not user_tag"})
 
-    # On filtre sur contact.user.tag.created
-    if topic != "contact.user.tag.created":
-        print("ℹ️ Événement ignoré :", topic)
-        return jsonify({"status": "ignored"}), 200
+    # Vérifie si le tag correspond à un VIP
+    tag_name = payload.get("tag", {}).get("name", "")
+    if not any(keyword.lower() in tag_name.lower() for keyword in VIP_KEYWORDS):
+        print("➡️ Tag non VIP, ignoré.")
+        return jsonify({"ignored": "not VIP"})
 
-    tag = item.get("tag", {}).get("name", "")
-    contact = item.get("contact", {})
+    print(f"🔥 Tag VIP détecté : {tag_name}")
 
-    print(f"🏷️ Tag reçu : {tag}")
+    # Récupération utilisateur
+    user = payload.get("user", {})
+    email = user.get("email")
+    name = user.get("name", email)
 
-    # Vérification VIP
-    if tag not in VIP_KEYWORDS:
-        print("⛔ Tag pas VIP → aucune action Freshdesk")
-        return jsonify({"status": "ignored_non_vip"}), 200
+    if not email:
+        return jsonify({"error": "no email"}), 400
 
-    print("🌟 Tag VIP détecté → mise à jour Freshdesk...")
+    print(f"👤 Utilisateur VIP : {email}")
 
-    email = contact.get("email")
-    freshdesk_id = get_freshdesk_contact_id(email)
+    # ------------------------------
+    # Récupère ou crée contact Freshdesk
+    # ------------------------------
+    status, data = freshdesk_request(f"/contacts?email={email}")
 
-    if not freshdesk_id:
-        return jsonify({"error": "contact_not_found_freshdesk"}), 404
+    if status == 200 and isinstance(data, list) and data:
+        contact = data[0]
+        print("📇 Contact Freshdesk trouvé")
+    else:
+        print("📇 Contact Freshdesk introuvable → création")
+        status, data = freshdesk_request("/contacts", "POST", {"email": email, "name": name})
+        if status not in (200, 201):
+            print("❌ Impossible de créer le contact Freshdesk")
+            return jsonify({"error": "cannot create contact", "details": data})
+        contact = data
 
-    update_freshdesk_contact_tags(freshdesk_id)
+    contact_id = contact.get("id")
 
-    return jsonify({"status": "freshdesk_tag_updated"}), 200
+    # ------------------------------
+    # Ajout tag VIP sur contact
+    # ------------------------------
+    existing_tags = contact.get("tags", [])
+    if VIP_TAG not in existing_tags:
+        freshdesk_request(f"/contacts/{contact_id}", "PUT", {"tags": existing_tags + [VIP_TAG]})
+        print("🏷 Tag VIP ajouté au contact")
 
+    # ------------------------------
+    # Mise à jour des tickets Freshdesk
+    # ------------------------------
+    status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
+
+    if status == 200 and isinstance(tickets, list):
+        print(f"🎫 {len(tickets)} tickets à mettre à jour")
+        for ticket in tickets:
+            ticket_tags = ticket.get("tags", [])
+            if VIP_TAG not in ticket_tags:
+                ticket_tags.append(VIP_TAG)
+
+            update_data = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
+            if ASSIGN_GROUP_ID:
+                update_data["group_id"] = ASSIGN_GROUP_ID
+
+            freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_data)
+            print(f"✅ Ticket #{ticket['id']} mis à jour avec priorité VIP")
+
+    return jsonify({"success": True, "email": email})
 
 # ------------------------------
-# Serveur local
+# Serveur local / Heroku
 # ------------------------------
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
