@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import hmac, hashlib, requests, os
+import json
 
 # ------------------------------
 # Chargement variables Heroku
@@ -87,6 +88,8 @@ def intercom_webhook():
     print("✅ Webhook Intercom authentifié")
 
     payload = request.json or {}
+
+    print("📦 Payload reçu :", json.dumps(payload, indent=2))
 
     # On traite uniquement les événements de type "user_tag"
     if payload.get("type") != "user_tag":
