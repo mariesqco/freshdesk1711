@@ -158,21 +158,21 @@ def intercom_webhook():
     # ------------------------------
     # Mise à jour des tickets Freshdesk
     # ------------------------------
-    status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
+    # status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
 
-    if status == 200 and isinstance(tickets, list):
-        logging.info(f"🎫 {len(tickets)} tickets à mettre à jour")
-        for ticket in tickets:
-            ticket_tags = ticket.get("tags", [])
-            if VIP_TAG not in ticket_tags:
-                ticket_tags.append(VIP_TAG)
+    # if status == 200 and isinstance(tickets, list):
+    #     logging.info(f"🎫 {len(tickets)} tickets à mettre à jour")
+    #     for ticket in tickets:
+    #         ticket_tags = ticket.get("tags", [])
+    #         if VIP_TAG not in ticket_tags:
+    #             ticket_tags.append(VIP_TAG)
 
-            update_ticket = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
-            if ASSIGN_GROUP_ID:
-                update_ticket["group_id"] = ASSIGN_GROUP_ID
+    #         update_ticket = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
+    #         if ASSIGN_GROUP_ID:
+    #             update_ticket["group_id"] = ASSIGN_GROUP_ID
 
-            freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_ticket)
-            logging.info(f"✅ Ticket #{ticket['id']} mis à jour")
+    #         freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_ticket)
+    #         logging.info(f"✅ Ticket #{ticket['id']} mis à jour")
 
     return jsonify({"success": True, "email": email})
 
