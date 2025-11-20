@@ -1,15 +1,14 @@
 from flask import Flask, request, jsonify
-import hmac, hashlib, requests, os, json
+import hmac, hashlib, requests, os, json, re
 
 # ------------------------------
-# Chargement variables Heroku
+# Chargement variables Heroku / environnement
 # ------------------------------
 INTERCOM_CLIENT_SECRET = os.getenv("INTERCOM_CLIENT_SECRET")
 FRESHDESK_DOMAIN = os.getenv("FRESHDESK_DOMAIN")
 FRESHDESK_API_KEY = os.getenv("FRESHDESK_API_KEY")
 DEFAULT_PRIORITY = int(os.getenv("DEFAULT_PRIORITY", 2))
 ASSIGN_GROUP_ID = os.getenv("ASSIGN_GROUP_ID")
-VIP_KEYWORDS = os.getenv("VIP_KEYWORDS", "VIP,⭐⭐VIP ⭐⭐").split(",")
 
 VIP_TAG = "⭐⭐VIP ⭐⭐"
 
@@ -84,7 +83,6 @@ def intercom_webhook():
     item = payload.get("data", {}).get("item", {})
     tag_name = item.get("tag", {}).get("name", "")
 
-    import re
     tag_clean = re.sub(r"[^a-zA-Z0-9]", "", tag_name).lower()
     if "vip" not in tag_clean:
         print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
@@ -118,30 +116,30 @@ def intercom_webhook():
     contact_id = contact_fd.get("id")
 
     # ------------------------------
-    # Ajout tag + champ personnalisé VIP
+    # Mise à jour des tags + champ personnalisé
     # ------------------------------
     existing_tags = contact_fd.get("tags", [])
+    new_tags = existing_tags.copy()
 
-    # Ajout du tag VIP si absent
-    if VIP_TAG not in existing_tags:
-        freshdesk_request(
-            f"/contacts/{contact_id}",
-            "PUT",
-            {"tags": existing_tags + [VIP_TAG]}
-        )
-        print("🏷 Tag VIP ajouté au contact")
+    if VIP_TAG not in new_tags:
+        new_tags.append(VIP_TAG)
+        print("🏷 Tag VIP ajouté")
 
-    # Mise à jour du champ personnalisé vip => "⭐⭐VIP ⭐⭐"
+    # ⚠️ Correction : un seul PUT pour tags + champ personnalisé
+    update_data = {
+        "tags": new_tags,
+        "custom_fields": {
+            "vip": VIP_TAG  # ← Champ "Infos client" (API name = vip)
+        }
+    }
+
     freshdesk_request(
         f"/contacts/{contact_id}",
         "PUT",
-        {
-            "custom_fields": {
-                "vip": VIP_TAG
-            }
-        }
+        update_data
     )
-    print("✨ Champ personnalisé VIP mis à jour")
+
+    print("✨ Contact mis à jour avec tags + champ personnalisé VIP")
 
     # ------------------------------
     # Mise à jour des tickets Freshdesk
@@ -155,11 +153,11 @@ def intercom_webhook():
             if VIP_TAG not in ticket_tags:
                 ticket_tags.append(VIP_TAG)
 
-            update_data = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
+            update_ticket = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
             if ASSIGN_GROUP_ID:
-                update_data["group_id"] = ASSIGN_GROUP_ID
+                update_ticket["group_id"] = ASSIGN_GROUP_ID
 
-            freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_data)
+            freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_ticket)
             print(f"✅ Ticket #{ticket['id']} mis à jour")
 
     return jsonify({"success": True, "email": email})
