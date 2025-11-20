@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import hmac, hashlib, requests, os, json, re
 import logging
+import time
 
 # Activation du niveau DEBUG pour voir plus de détails
 logging.basicConfig(level=logging.DEBUG)
@@ -19,11 +20,30 @@ VIP_TAG = "⭐⭐VIP ⭐⭐"
 app = Flask(__name__)
 
 # ------------------------------
-# Route racine
+# Gestion Rate Limit 20/minute pour contacts list
 # ------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Webhook Intercom/Freshdesk is running 🚀", 200
+contacts_request_count = 0
+contacts_request_time = time.time()
+
+def rate_limit_contacts():
+    global contacts_request_count, contacts_request_time
+    current_time = time.time()
+    # Si une minute s’est écoulée, on reset
+    if current_time - contacts_request_time > 60:
+        contacts_request_time = current_time
+        contacts_request_count = 0
+
+    # Si déjà 20 dans la minute, on attend que la minute soit écoulée
+    if contacts_request_count >= 20:
+        sleep_time = 60 - (current_time - contacts_request_time)
+        if sleep_time > 0:
+            logging.warning(f"Limite de 20 requêtes contacts/min atteinte, attente de {sleep_time:.2f} secondes")
+            time.sleep(sleep_time)
+        # reset après attente
+        contacts_request_time = time.time()
+        contacts_request_count = 0
+
+    contacts_request_count += 1
 
 # ------------------------------
 # Vérification signature Intercom
@@ -31,38 +51,51 @@ def home():
 def verify_signature(raw_body, signature_header):
     if not signature_header:
         return False
-
     if signature_header.startswith("sha1="):
         received_sig = signature_header.split("sha1=")[1]
     else:
         received_sig = signature_header
-
     computed_sig = hmac.new(
         INTERCOM_CLIENT_SECRET.encode(),
         raw_body,
         hashlib.sha1
     ).hexdigest()
-
     return hmac.compare_digest(received_sig, computed_sig)
 
 # ------------------------------
-# Appels API Freshdesk
+# Appels API Freshdesk avec gestion du rate limiting (429)
 # ------------------------------
-def freshdesk_request(path, method="GET", data=None):
+def freshdesk_request(path, method="GET", data=None, is_contact_list=False):
+    if is_contact_list:
+        rate_limit_contacts()
     url = f"https://{FRESHDESK_DOMAIN}/api/v2{path}"
     headers = {"Content-Type": "application/json"}
     auth = (FRESHDESK_API_KEY, "X")
 
-    response = requests.request(method, url, headers=headers, json=data, auth=auth)
-    logging.debug(f"Request {method} {url} Status: {response.status_code}")
+    max_retries = 5
+    retries = 0
 
-    try:
-        response_data = response.json()
-        logging.debug(f"Response JSON: {json.dumps(response_data, indent=2)}")
-        return response.status_code, response_data
-    except Exception as e:
-        logging.error(f"Erreur JSON response : {e}")
-        return response.status_code, response.text
+    while True:
+        response = requests.request(method, url, headers=headers, json=data, auth=auth)
+        logging.debug(f"Request {method} {url} Status: {response.status_code}")
+
+        if response.status_code == 429:
+            retries += 1
+            if retries > max_retries:
+                logging.error("Trop de tentatives suite à des erreurs 429, abandon.")
+                return response.status_code, None
+            retry_after = int(response.headers.get("Retry-After", 5))
+            logging.warning(f"429 Too Many Requests: attente {retry_after} secondes avant retry {retries}/{max_retries}")
+            time.sleep(retry_after)
+            continue
+
+        try:
+            response_data = response.json()
+            logging.debug(f"Response JSON: {json.dumps(response_data, indent=2)}")
+            return response.status_code, response_data
+        except Exception as e:
+            logging.error(f"Erreur JSON response : {e}")
+            return response.status_code, response.text
 
 # ------------------------------
 # Webhook Intercom
@@ -107,14 +140,22 @@ def intercom_webhook():
     # ------------------------------
     # Récupération / création du contact Freshdesk
     # ------------------------------
-    status, data = freshdesk_request(f"/contacts?email={email}")
+    status, data = freshdesk_request(f"/contacts?email={email}", is_contact_list=True)
 
     if status == 200 and isinstance(data, list) and data:
         contact_fd = data[0]
         logging.info("📇 Contact Freshdesk trouvé")
     else:
         logging.info("📇 Contact Freshdesk introuvable → création")
-        status, data = freshdesk_request("/contacts", "POST", {"email": email, "name": name})
+        creation_data = {
+            "email": email,
+            "name": name,
+            "custom_fields": {
+                "vip": VIP_TAG
+            },
+            "tags": [VIP_TAG]
+        }
+        status, data = freshdesk_request("/contacts", "POST", creation_data)
         if status not in (200, 201):
             logging.error("❌ Impossible de créer le contact Freshdesk: %s", data)
             return jsonify({"error": "cannot create contact", "details": data})
@@ -156,26 +197,25 @@ def intercom_webhook():
         logging.error("❌ Erreur lors de la mise à jour du contact : %s", update_response)
 
     # ------------------------------
-    # Mise à jour des tickets Freshdesk
+    # Mise à jour des tickets Freshdesk (désactivée)
     # ------------------------------
     # status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
-
+    #
     # if status == 200 and isinstance(tickets, list):
     #     logging.info(f"🎫 {len(tickets)} tickets à mettre à jour")
     #     for ticket in tickets:
     #         ticket_tags = ticket.get("tags", [])
     #         if VIP_TAG not in ticket_tags:
     #             ticket_tags.append(VIP_TAG)
-
+    #
     #         update_ticket = {"priority": DEFAULT_PRIORITY, "tags": ticket_tags}
     #         if ASSIGN_GROUP_ID:
     #             update_ticket["group_id"] = ASSIGN_GROUP_ID
-
+    #
     #         freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_ticket)
     #         logging.info(f"✅ Ticket #{ticket['id']} mis à jour")
 
     return jsonify({"success": True, "email": email})
-
 
 # ------------------------------
 # Serveur local / Heroku
