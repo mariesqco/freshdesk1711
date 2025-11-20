@@ -1,5 +1,9 @@
 from flask import Flask, request, jsonify
 import hmac, hashlib, requests, os, json, re
+import logging
+
+# Activation du niveau DEBUG pour voir plus de détails
+logging.basicConfig(level=logging.DEBUG)
 
 # ------------------------------
 # Chargement variables Heroku / environnement
@@ -50,10 +54,14 @@ def freshdesk_request(path, method="GET", data=None):
     auth = (FRESHDESK_API_KEY, "X")
 
     response = requests.request(method, url, headers=headers, json=data, auth=auth)
+    logging.debug(f"Request {method} {url} Status: {response.status_code}")
 
     try:
-        return response.status_code, response.json()
-    except:
+        response_data = response.json()
+        logging.debug(f"Response JSON: {json.dumps(response_data, indent=2)}")
+        return response.status_code, response_data
+    except Exception as e:
+        logging.error(f"Erreur JSON response : {e}")
         return response.status_code, response.text
 
 # ------------------------------
@@ -66,26 +74,25 @@ def intercom_webhook():
 
     if not verify_signature(raw, signature):
         if signature is None:
-            print("⚠️ Test Webhook Intercom reçu (pas signé)")
+            logging.warning("⚠️ Test Webhook Intercom reçu (pas signé)")
             return jsonify({"warning": "Unsigned Intercom test webhook"}), 200
-        print("❌ Signature Intercom invalide")
+        logging.error("❌ Signature Intercom invalide")
         return "Invalid signature", 401
 
-    print("✅ Webhook Intercom authentifié")
+    logging.info("✅ Webhook Intercom authentifié")
     payload = request.json or {}
-    print("📦 Payload reçu :", json.dumps(payload, indent=2, ensure_ascii=False))
+    logging.info("📦 Payload reçu :\n%s", json.dumps(payload, indent=2, ensure_ascii=False))
 
     topic = payload.get("topic")
     if topic != "contact.user.tag.created":
-        print(f"ℹ️ Événement ignoré : {topic}")
+        logging.info(f"ℹ️ Événement ignoré : {topic}")
         return jsonify({"ignored": "not contact.user.tag.created"})
 
     item = payload.get("data", {}).get("item", {})
     tag_name = item.get("tag", {}).get("name", "")
-
     tag_clean = re.sub(r"[^a-zA-Z0-9]", "", tag_name).lower()
     if "vip" not in tag_clean:
-        print(f"➡️ Tag non VIP ({tag_name}), ignoré.")
+        logging.info(f"➡️ Tag non VIP ({tag_name}), ignoré.")
         return jsonify({"ignored": "not VIP"})
 
     contact = item.get("contact", {})
@@ -95,7 +102,7 @@ def intercom_webhook():
     if not email:
         return jsonify({"error": "no email"}), 400
 
-    print(f"🔥 Tag VIP détecté pour : {email}")
+    logging.info(f"🔥 Tag VIP détecté pour : {email}")
 
     # ------------------------------
     # Récupération / création du contact Freshdesk
@@ -104,14 +111,17 @@ def intercom_webhook():
 
     if status == 200 and isinstance(data, list) and data:
         contact_fd = data[0]
-        print("📇 Contact Freshdesk trouvé")
+        logging.info("📇 Contact Freshdesk trouvé")
     else:
-        print("📇 Contact Freshdesk introuvable → création")
+        logging.info("📇 Contact Freshdesk introuvable → création")
         status, data = freshdesk_request("/contacts", "POST", {"email": email, "name": name})
         if status not in (200, 201):
-            print("❌ Impossible de créer le contact Freshdesk")
+            logging.error("❌ Impossible de créer le contact Freshdesk: %s", data)
             return jsonify({"error": "cannot create contact", "details": data})
         contact_fd = data
+
+    logging.debug("Données du contact Freshdesk :\n%s", json.dumps(contact_fd, indent=2))
+    logging.debug("Champs personnalisés actuels :\n%s", json.dumps(contact_fd.get("custom_fields", {}), indent=2))
 
     contact_id = contact_fd.get("id")
 
@@ -123,23 +133,27 @@ def intercom_webhook():
 
     if VIP_TAG not in new_tags:
         new_tags.append(VIP_TAG)
-        print("🏷 Tag VIP ajouté")
+        logging.info("🏷 Tag VIP ajouté")
 
-    # ⚠️ Correction : un seul PUT pour tags + champ personnalisé
     update_data = {
         "tags": new_tags,
         "custom_fields": {
-            "vip": VIP_TAG  # ← Champ "Infos client" (API name = vip)
+            "vip": VIP_TAG  # Champ "Infos client" (API name = vip)
         }
     }
 
-    freshdesk_request(
+    logging.debug("Données pour mise à jour du contact :\n%s", json.dumps(update_data, indent=2))
+
+    update_status, update_response = freshdesk_request(
         f"/contacts/{contact_id}",
         "PUT",
         update_data
     )
 
-    print("✨ Contact mis à jour avec tags + champ personnalisé VIP")
+    if update_status in (200, 201):
+        logging.info("✨ Contact mis à jour avec tags + champ personnalisé VIP")
+    else:
+        logging.error("❌ Erreur lors de la mise à jour du contact : %s", update_response)
 
     # ------------------------------
     # Mise à jour des tickets Freshdesk
@@ -147,7 +161,7 @@ def intercom_webhook():
     status, tickets = freshdesk_request(f"/tickets?requester_id={contact_id}")
 
     if status == 200 and isinstance(tickets, list):
-        print(f"🎫 {len(tickets)} tickets à mettre à jour")
+        logging.info(f"🎫 {len(tickets)} tickets à mettre à jour")
         for ticket in tickets:
             ticket_tags = ticket.get("tags", [])
             if VIP_TAG not in ticket_tags:
@@ -158,7 +172,7 @@ def intercom_webhook():
                 update_ticket["group_id"] = ASSIGN_GROUP_ID
 
             freshdesk_request(f"/tickets/{ticket['id']}", "PUT", update_ticket)
-            print(f"✅ Ticket #{ticket['id']} mis à jour")
+            logging.info(f"✅ Ticket #{ticket['id']} mis à jour")
 
     return jsonify({"success": True, "email": email})
 
